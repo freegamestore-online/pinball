@@ -35,6 +35,12 @@ const FLIPPER_BOOST = 0.5; // px/ms imparted by an actively-raising flipper
 const POINTS_BUMPER = 100;
 const POINTS_SLINGSHOT = 50;
 const POINTS_WALL_BOUNCE = 5;
+const POINTS_DROP_TARGET = 250;
+const POINTS_ALL_DROP_BONUS = 1500;
+
+const MULTIPLIER_DURATION = 9000; // ms of 2× scoring after clearing all targets
+const DROP_RESET_DELAY = 5500;    // ms before fallen targets pop back up
+const SHAKE_MS = 320;             // drain tilt-shake duration
 
 const START_BALLS = 3;
 
@@ -45,6 +51,22 @@ interface Ball {
   vx: number;
   vy: number;
   alive: boolean;
+  trail: Array<{ x: number; y: number }>;
+}
+interface DropTarget {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  down: boolean;     // true once hit, false when reset
+  hitFlash: number;  // ms remaining of "just hit" glow
+}
+interface ScorePopup {
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  age: number;
 }
 interface Bumper {
   x: number;
@@ -73,7 +95,7 @@ interface Flipper {
   raising: boolean;
 }
 
-type Phase = "intro" | "ready" | "playing" | "drained" | "over";
+type Phase = "intro" | "ready" | "playing" | "over";
 
 interface GameState {
   ball: Ball | null;
@@ -82,9 +104,14 @@ interface GameState {
   bumpers: Bumper[];
   slingshots: Slingshot[];
   walls: Wall[];
+  dropTargets: DropTarget[];
+  dropResetTimer: number; // > 0 means all-cleared, will reset after this many ms
+  multiplier: number;     // current score multiplier (1 or 2)
+  multiplierTimer: number;// ms remaining of multiplier
+  popups: ScorePopup[];
+  shake: number;          // ms remaining of tilt-shake
   ballsLeft: number;
   score: number;
-  drainTimer: number; // ms remaining before next ball auto-loads
   time: number;
   frame: number;
 }
@@ -134,6 +161,18 @@ function buildBumpers(): Bumper[] {
   ];
 }
 
+function buildDropTargets(): DropTarget[] {
+  // Row of 4 drop targets across the middle of the playfield.
+  const targets: DropTarget[] = [];
+  const startX = 40;
+  const gap = 50;
+  const y = 240;
+  for (let i = 0; i < 4; i++) {
+    targets.push({ x: startX + i * gap, y, w: 36, h: 8, down: false, hitFlash: 0 });
+  }
+  return targets;
+}
+
 function freshState(): GameState {
   return {
     ball: null,
@@ -142,9 +181,14 @@ function freshState(): GameState {
     bumpers: buildBumpers(),
     slingshots: buildSlingshots(),
     walls: buildWalls(),
+    dropTargets: buildDropTargets(),
+    dropResetTimer: 0,
+    multiplier: 1,
+    multiplierTimer: 0,
+    popups: [],
+    shake: 0,
     ballsLeft: START_BALLS,
     score: 0,
-    drainTimer: 0,
     time: 0,
     frame: 0,
   };
@@ -158,6 +202,7 @@ function launchBall(): Ball {
     vx: (Math.random() - 0.5) * 0.2,
     vy: 0.05,
     alive: true,
+    trail: [],
   };
 }
 
@@ -245,6 +290,25 @@ function collideBumper(b: Ball, bumper: Bumper): boolean {
     b.vx = nx * 0.35;
     b.vy = ny * 0.35;
   }
+  return true;
+}
+
+// Ball vs axis-aligned rectangle (used for drop targets).
+function collideAabb(b: Ball, x: number, y: number, w: number, h: number, rest: number): boolean {
+  const cx = Math.max(x, Math.min(b.x, x + w));
+  const cy = Math.max(y, Math.min(b.y, y + h));
+  const dx = b.x - cx;
+  const dy = b.y - cy;
+  const d = Math.hypot(dx, dy);
+  if (d >= BALL_R) return false;
+  let nx: number, ny: number;
+  if (d === 0) { nx = 0; ny = -1; }
+  else { nx = dx / d; ny = dy / d; }
+  const push = BALL_R - d + 0.1;
+  b.x += nx * push;
+  b.y += ny * push;
+  const into = b.vx * (-nx) + b.vy * (-ny);
+  if (into > 0) [b.vx, b.vy] = reflect(b.vx, b.vy, nx, ny, rest);
   return true;
 }
 
@@ -422,9 +486,34 @@ export default function App() {
       animateFlipper(s.leftFlip, lp, dt);
       animateFlipper(s.rightFlip, rp, dt);
 
-      // Decay flash timers on bumpers + slingshots
+      // Decay flash timers on bumpers + slingshots + drop targets
       for (const b of s.bumpers) b.flash = Math.max(0, b.flash - dt);
       for (const sl of s.slingshots) sl.flash = Math.max(0, sl.flash - dt);
+      for (const dt2 of s.dropTargets) dt2.hitFlash = Math.max(0, dt2.hitFlash - dt);
+      s.shake = Math.max(0, s.shake - dt);
+
+      // Decay popups
+      const livePopups: ScorePopup[] = [];
+      for (const p of s.popups) {
+        p.age += dt;
+        if (p.age < 900) livePopups.push(p);
+      }
+      s.popups = livePopups;
+
+      // Multiplier countdown
+      if (s.multiplierTimer > 0) {
+        s.multiplierTimer = Math.max(0, s.multiplierTimer - dt);
+        if (s.multiplierTimer === 0) s.multiplier = 1;
+      }
+
+      // Drop-target reset cycle: once player cleared the row, repopulate after
+      // DROP_RESET_DELAY so the row can be hit again.
+      if (s.dropResetTimer > 0) {
+        s.dropResetTimer = Math.max(0, s.dropResetTimer - dt);
+        if (s.dropResetTimer === 0) {
+          for (const t of s.dropTargets) { t.down = false; t.hitFlash = 0; }
+        }
+      }
 
       if (phaseRef.current !== "playing") return;
 
@@ -438,6 +527,10 @@ export default function App() {
       ball.vy *= f;
       [ball.vx, ball.vy] = clampLen(ball.vx, ball.vy, MAX_SPEED);
 
+      // Ball trail — append each frame, capped
+      ball.trail.push({ x: ball.x, y: ball.y });
+      if (ball.trail.length > 8) ball.trail.shift();
+
       // Substepped motion + collisions
       const substeps = 3;
       const sx = ball.vx / substeps;
@@ -449,15 +542,16 @@ export default function App() {
         // Walls
         for (const w of s.walls) {
           if (collideLine(ball, w.ax, w.ay, w.bx, w.by, WALL_RESTITUTION, 1)) {
-            s.score += POINTS_WALL_BOUNCE;
+            s.score += POINTS_WALL_BOUNCE * s.multiplier;
           }
         }
         // Slingshots (line + extra push along normal)
         for (const sl of s.slingshots) {
           if (collideLine(ball, sl.ax, sl.ay, sl.bx, sl.by, 1.0, 1)) {
             sl.flash = 180;
-            s.score += POINTS_SLINGSHOT;
-            // Extra kick along reflection direction (away from surface)
+            const pts = POINTS_SLINGSHOT * s.multiplier;
+            s.score += pts;
+            s.popups.push({ x: (sl.ax + sl.bx) / 2, y: (sl.ay + sl.by) / 2 - 6, text: `+${pts}`, color: "#fde68a", age: 0 });
             const speed = Math.hypot(ball.vx, ball.vy);
             if (speed > 0) {
               const k = Math.min(1.4, speed * 1.25);
@@ -473,8 +567,32 @@ export default function App() {
         for (const b of s.bumpers) {
           if (collideBumper(ball, b)) {
             b.flash = 220;
-            s.score += b.points;
+            const pts = b.points * s.multiplier;
+            s.score += pts;
+            s.popups.push({ x: b.x, y: b.y - b.r - 4, text: `+${pts}`, color: "#facc15", age: 0 });
             sounds.playScore();
+          }
+        }
+        // Drop targets
+        for (const dt2 of s.dropTargets) {
+          if (dt2.down) continue;
+          if (collideAabb(ball, dt2.x, dt2.y, dt2.w, dt2.h, 0.6)) {
+            dt2.down = true;
+            dt2.hitFlash = 260;
+            const pts = POINTS_DROP_TARGET * s.multiplier;
+            s.score += pts;
+            s.popups.push({ x: dt2.x + dt2.w / 2, y: dt2.y - 4, text: `+${pts}`, color: "#86efac", age: 0 });
+            sounds.playClear();
+            // Cleared them all? Award bonus + activate multiplier.
+            if (s.dropTargets.every((t) => t.down)) {
+              const bonus = POINTS_ALL_DROP_BONUS * s.multiplier;
+              s.score += bonus;
+              s.popups.push({ x: FIELD_W / 2, y: dt2.y - 24, text: `ROW CLEAR +${bonus}`, color: "#86efac", age: 0 });
+              s.multiplier = 2;
+              s.multiplierTimer = MULTIPLIER_DURATION;
+              s.dropResetTimer = DROP_RESET_DELAY;
+              sounds.playLevelUp();
+            }
           }
         }
         // Flippers
@@ -487,6 +605,7 @@ export default function App() {
         ball.alive = false;
         s.ballsLeft--;
         s.ball = null;
+        s.shake = SHAKE_MS;
         sounds.playError();
         if (s.ballsLeft <= 0) {
           updateHighScore(s.score);
@@ -517,6 +636,16 @@ export default function App() {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Tilt-shake offset on drain — small random jitter for SHAKE_MS
+    if (s.shake > 0) {
+      const intensity = (s.shake / SHAKE_MS) * 3;
+      const sx = (Math.random() - 0.5) * 2 * intensity;
+      const sy = (Math.random() - 0.5) * 2 * intensity;
+      ctx.translate(sx, sy);
+    }
 
     // Playfield gradient
     const grad = ctx.createLinearGradient(0, 0, 0, FIELD_H);
@@ -594,6 +723,25 @@ export default function App() {
       ctx.fill();
     }
 
+    // Drop targets row
+    for (const t of s.dropTargets) {
+      if (t.down) {
+        // Faint ghost outline for dropped-down state
+        ctx.strokeStyle = "rgba(34, 197, 94, 0.18)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(t.x, t.y + t.h - 1, t.w, 1);
+        continue;
+      }
+      const flashing = t.hitFlash > 0;
+      ctx.fillStyle = flashing ? "#bbf7d0" : "#22c55e";
+      ctx.fillRect(t.x, t.y, t.w, t.h);
+      ctx.fillStyle = flashing ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.25)";
+      ctx.fillRect(t.x + 1, t.y + 1, t.w - 2, 2);
+      ctx.strokeStyle = "#14532d";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(t.x + 0.5, t.y + 0.5, t.w - 1, t.h - 1);
+    }
+
     // Flippers (rotated capsules)
     drawFlipper(ctx, s.leftFlip);
     drawFlipper(ctx, s.rightFlip);
@@ -602,9 +750,19 @@ export default function App() {
     ctx.fillStyle = "rgba(220,38,38,0.18)";
     ctx.fillRect(60, FIELD_H - 12, FIELD_W - 120, 8);
 
-    // Ball
+    // Ball trail (fading dots behind ball)
     const ball = s.ball;
     if (ball && ball.alive) {
+      for (let i = 0; i < ball.trail.length; i++) {
+        const p = ball.trail[i]!;
+        const alpha = (i + 1) / (ball.trail.length + 1) * 0.45;
+        const r = BALL_R * (0.3 + 0.6 * (i + 1) / ball.trail.length);
+        ctx.fillStyle = `rgba(226, 232, 240, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Ball itself
       const bgrad = ctx.createRadialGradient(ball.x - 2, ball.y - 2, 1, ball.x, ball.y, BALL_R);
       bgrad.addColorStop(0, "#ffffff");
       bgrad.addColorStop(0.7, "#cbd5e1");
@@ -616,6 +774,27 @@ export default function App() {
       ctx.strokeStyle = "rgba(0,0,0,0.35)";
       ctx.lineWidth = 0.6;
       ctx.stroke();
+    }
+
+    // Score popups
+    for (const p of s.popups) drawPopup(ctx, p);
+
+    // Multiplier banner (top-center)
+    if (s.multiplier > 1) {
+      const remain = s.multiplierTimer / MULTIPLIER_DURATION;
+      const w = 64;
+      const h = 16;
+      const x = FIELD_W / 2 - w / 2;
+      const y = 4;
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = "#facc15";
+      ctx.fillRect(x, y, w * remain, h);
+      ctx.fillStyle = "#0a0a0a";
+      ctx.font = "bold 11px 'Fraunces', serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`${s.multiplier}× SCORE`, x + w / 2, y + h / 2);
     }
   }, []);
 
@@ -843,6 +1022,22 @@ function animateFlipper(f: Flipper, pressed: boolean, dt: number) {
     f.angle = Math.max(target, f.angle - FLIP_RATE * dt);
   }
   f.raising = pressed && f.angle !== target;
+}
+
+function drawPopup(ctx: CanvasRenderingContext2D, p: ScorePopup) {
+  const t = p.age / 900;
+  const yOff = -18 * t;
+  const alpha = Math.max(0, 1 - t);
+  ctx.font = "bold 11px 'Fraunces', serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = `rgba(0,0,0,${alpha * 0.7})`;
+  ctx.fillText(p.text, p.x + 1, p.y + yOff + 1);
+  // Convert hex/short color to rgba with alpha; if non-hex string given (e.g. css name), still works in canvas via globalAlpha fallback.
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = p.color;
+  ctx.fillText(p.text, p.x, p.y + yOff);
+  ctx.globalAlpha = 1;
 }
 
 function drawFlipper(ctx: CanvasRenderingContext2D, f: Flipper) {
