@@ -1,4 +1,4 @@
-# pinball
+# Pinball
 
 A free game on FreeGameStore.
 
