@@ -76,7 +76,7 @@ interface Bumper {
   flash: number; // ms remaining
 }
 interface Slingshot {
-  // triangle with a 45° hypotenuse; we represent it as a line line that
+  // triangle with a 45° hypotenuse; we represent it as a line segment that
   // imparts an extra push when struck.
   ax: number; ay: number;
   bx: number; by: number;
@@ -144,7 +144,7 @@ function buildWalls(): Wall[] {
 
 function buildSlingshots(): Slingshot[] {
   // Two triangular cushions above the flippers — the diagonal face of each
-  // is a "live" slingshot line that gives an extra push.
+  // is a "live" slingshot segment that gives an extra push.
   return [
     { ax: 30, ay: 290, bx: 70, by: 330, flash: 0 },   // left slingshot diagonal
     { ax: FIELD_W - 70, ay: 330, bx: FIELD_W - 30, by: 290, flash: 0 }, // right
@@ -217,7 +217,7 @@ function clampLen(vx: number, vy: number, max: number): [number, number] {
   return [vx, vy];
 }
 
-// Closest point on line a→b to point p.
+// Closest point on segment a→b to point p.
 function closestPointOnSeg(ax: number, ay: number, bx: number, by: number, px: number, py: number): { x: number; y: number; t: number } {
   const dx = bx - ax;
   const dy = by - ay;
@@ -239,7 +239,7 @@ function reflect(vx: number, vy: number, nx: number, ny: number, rest: number): 
 
 // ─── Collision routines ───
 
-// Ball vs line line. Returns true if collision applied.
+// Ball vs line segment. Returns true if collision applied.
 function collideLine(
   b: Ball,
   ax: number, ay: number, bx: number, by: number,
