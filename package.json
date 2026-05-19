@@ -1,0 +1,14 @@
+{
+  "name": "pinball",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "engines": { "node": ">=22" },
+  "pnpm": { "onlyBuiltDependencies": ["esbuild"] },
+  "scripts": {
+    "dev": "pnpm --filter @pinball/web dev",
+    "build": "pnpm --filter @pinball/web build",
+    "preview": "pnpm --filter @pinball/web preview",
+    "typecheck": "pnpm --filter @pinball/web exec tsc -b",
+    "test": "pnpm --filter @pinball/web test"
+  }
+}
