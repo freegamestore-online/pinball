@@ -35,9 +35,9 @@ export default defineConfig({
         ],
       },
       manifest: {
-        name: "bubbleshooter",
-        short_name: "bubbleshooter",
-        description: "bubbleshooter — free forever",
+        name: "Pinball",
+        short_name: "Pinball",
+        description: "Free pinball game — part of FreeGameStore",
         start_url: "/",
         display: "standalone", orientation: "any",
         background_color: "#0f0f0f",
