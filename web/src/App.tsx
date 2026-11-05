@@ -8,6 +8,18 @@ import {
 } from "@freegamestore/games";
 import { useHighScore } from "./hooks/useHighScore";
 
+// useGameSounds reads SoundContext which GameShell provides INTERNALLY.
+// Calling it directly above <GameShell> would get a disconnected (muted)
+// default; AudioBridge is a tiny no-render child of GameShell that exposes
+// the real sounds API via ref to the App scope.
+type SoundsApi = ReturnType<typeof useGameSounds>;
+
+function AudioBridge({ apiRef }: { apiRef: React.MutableRefObject<SoundsApi | null> }) {
+  const sounds = useGameSounds();
+  apiRef.current = sounds;
+  return null;
+}
+
 // ─── Field constants (logical pixels — canvas scales via CSS) ───
 const FIELD_W = 280;
 const FIELD_H = 400;
@@ -371,13 +383,13 @@ export default function App() {
   const phaseRef = useRef<Phase>("intro");
   const scoreRef = useRef(0);
   const ballsRef = useRef(START_BALLS);
+  const soundsRef = useRef<SoundsApi | null>(null);
 
   const [score, setScore] = useState(0);
   const [ballsLeft, setBallsLeft] = useState(START_BALLS);
   const [phase, setPhase] = useState<Phase>("intro");
   const [, force] = useState(0);
   const [bestScore, updateHighScore] = useHighScore("pinball-best");
-  const sounds = useGameSounds();
   phaseRef.current = phase;
 
   const startNewGame = useCallback(() => {
@@ -396,8 +408,8 @@ export default function App() {
     s.ball = launchBall();
     setPhase("playing");
     phaseRef.current = "playing";
-    sounds.playMove();
-  }, [sounds]);
+    soundsRef.current?.playMove();
+  }, []);
 
   // Keyboard
   useEffect(() => {
@@ -560,7 +572,7 @@ export default function App() {
               ball.vx = nx * k;
               ball.vy = ny * k;
             }
-            sounds.playMove();
+            soundsRef.current?.playMove();
           }
         }
         // Bumpers
@@ -570,7 +582,7 @@ export default function App() {
             const pts = b.points * s.multiplier;
             s.score += pts;
             s.popups.push({ x: b.x, y: b.y - b.r - 4, text: `+${pts}`, color: "#facc15", age: 0 });
-            sounds.playScore();
+            soundsRef.current?.playScore();
           }
         }
         // Drop targets
@@ -582,7 +594,7 @@ export default function App() {
             const pts = POINTS_DROP_TARGET * s.multiplier;
             s.score += pts;
             s.popups.push({ x: dt2.x + dt2.w / 2, y: dt2.y - 4, text: `+${pts}`, color: "#86efac", age: 0 });
-            sounds.playClear();
+            soundsRef.current?.playClear();
             // Cleared them all? Award bonus + activate multiplier.
             if (s.dropTargets.every((t) => t.down)) {
               const bonus = POINTS_ALL_DROP_BONUS * s.multiplier;
@@ -591,7 +603,7 @@ export default function App() {
               s.multiplier = 2;
               s.multiplierTimer = MULTIPLIER_DURATION;
               s.dropResetTimer = DROP_RESET_DELAY;
-              sounds.playLevelUp();
+              soundsRef.current?.playLevelUp();
             }
           }
         }
@@ -606,12 +618,12 @@ export default function App() {
         s.ballsLeft--;
         s.ball = null;
         s.shake = SHAKE_MS;
-        sounds.playError();
+        soundsRef.current?.playError();
         if (s.ballsLeft <= 0) {
           updateHighScore(s.score);
           setPhase("over");
           phaseRef.current = "over";
-          sounds.playGameOver();
+          soundsRef.current?.playGameOver();
         } else {
           setPhase("ready");
           phaseRef.current = "ready";
@@ -628,7 +640,7 @@ export default function App() {
         setBallsLeft(s.ballsLeft);
       }
     },
-    [sounds, updateHighScore],
+    [updateHighScore],
   );
 
   const draw = useCallback((s: GameState) => {
@@ -830,6 +842,7 @@ export default function App() {
         />
       }
     >
+      <AudioBridge apiRef={soundsRef} />
       <div
         style={{
           height: "100%",
